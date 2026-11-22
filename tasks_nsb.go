@@ -901,7 +901,12 @@ func runNSBTask(ctx context.Context, session *appSession, fileName, fileContent,
 
 	session.sendWSMessage("nsb_csv_complete", nsbCSVCompletePayload{Headers: headers, Rows: rows, File: outFile, Status: completionStatus, Message: completionMessage, QualifiedCount: qualifiedCount})
 	session.sendWSMessage("log", fmt.Sprintf("非标优选完成，结果文件: %s", outFile))
-	emitNSBRunResults(nsbResults, completionStatus, completionMessage)
+	if !emitNSBRunResults(nsbResults, completionStatus, completionMessage) && len(nsbResults) > 0 {
+		// 单次任务（非批量/定时）：缓存结果，供「立即推送上次结果」使用。
+		cfg := loadPanelConfig()
+		entries, _ := buildCFNextIPs(nsbResults, cfg.CFNext, "CF")
+		setLastMultiSource(nsbResults, entries, fmt.Sprintf("单次任务 %d 条结果", len(nsbResults)))
+	}
 }
 
 func checkReallinkCandidate(ctx context.Context, ipAddr string, port int, probeHost string) (bool, string, string) {

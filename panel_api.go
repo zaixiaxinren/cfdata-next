@@ -96,10 +96,57 @@ func panelWSHandlers(session *appSession) map[string]func(json.RawMessage) {
 				session.sendWSMessage("panel_data", panelStatePayload())
 			}()
 		},
+		"page_config_save": func(data json.RawMessage) {
+			var params struct {
+				NSB pageNSBConfig `json:"nsb"`
+			}
+			if err := json.Unmarshal(data, &params); err != nil {
+				session.sendWSMessage("error", "页面配置解析失败: "+err.Error())
+				return
+			}
+			nsb := params.NSB
+			cfg, err := updatePanelConfig(func(c *panelConfig) error {
+				urls := splitSourceURLs(nsb.SourceURL)
+				sources := make([]ipSource, 0, len(urls))
+				for i, u := range urls {
+					sources = append(sources, ipSource{
+						Name:    sourceDefaultName(u, i),
+						URL:     u,
+						Port:    nsb.FallbackPort,
+						TLS:     nsb.TLS,
+						Enabled: true,
+					})
+				}
+				c.Sources = sources
+				c.Runner = runnerConfig{
+					Threads:      nsb.Threads,
+					Delay:        nsb.Delay,
+					ResultLimit:  nsb.ResultLimit,
+					SpeedTest:    nsb.SpeedTest,
+					SpeedMin:     nsb.SpeedMin,
+					SpeedLimit:   nsb.SpeedLimit,
+					ScanMode:     nsb.ScanMode,
+					FallbackPort: nsb.FallbackPort,
+					SpeedURL:     nsb.SpeedURL,
+					OutFile:      nsb.OutFile,
+				}
+				return nil
+			})
+			if err != nil {
+				session.sendWSMessage("error", "保存页面配置失败: "+err.Error())
+				return
+			}
+			msg := fmt.Sprintf("页面配置已保存，定时任务将使用 %d 个网络来源", len(cfg.Sources))
+			if len(cfg.Sources) == 0 {
+				msg = "页面配置已保存；当前是本地文件模式，定时任务需要填写网络 URL 才能自动运行"
+			}
+			session.sendWSMessage("panel_saved", map[string]interface{}{"message": msg})
+			session.sendWSMessage("panel_data", panelStatePayloadFrom(cfg))
+		},
 		"run_multisource": func(data json.RawMessage) {
 			cfg := loadPanelConfig()
 			if countEnabledSources(cfg.Sources) == 0 {
-				session.sendWSMessage("error", "没有启用的 IP 来源，请先在设置里添加")
+				session.sendWSMessage("error", "没有可用的网络来源，请先在页面填写网络 URL 并保存配置")
 				return
 			}
 			session.startTaskNamed("多来源测速", "nsb", map[string]interface{}{"sources": countEnabledSources(cfg.Sources)}, func(ctx context.Context, s *appSession) {
@@ -121,6 +168,22 @@ func panelWSHandlers(session *appSession) map[string]func(json.RawMessage) {
 			})
 		},
 	}
+}
+
+// pageNSBConfig 是页面「非标参数」提交上来的表单值（前端已转成正确类型）。
+type pageNSBConfig struct {
+	SourceURL    string  `json:"sourceUrl"`
+	Threads      int     `json:"threads"`
+	Delay        int     `json:"delay"`
+	ResultLimit  int     `json:"resultLimit"`
+	FallbackPort int     `json:"fallbackPort"`
+	SpeedTest    int     `json:"speedTest"`
+	SpeedMin     float64 `json:"speedMin"`
+	SpeedLimit   int     `json:"speedLimit"`
+	ScanMode     string  `json:"scanMode"`
+	TLS          bool    `json:"tls"`
+	SpeedURL     string  `json:"speedUrl"`
+	OutFile      string  `json:"outFile"`
 }
 
 // mergeCFNextInput 允许前端把未保存的表单值一起带上来做即时测试/推送。

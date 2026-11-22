@@ -24,13 +24,16 @@ func setNSBRunResultSink(fn func(results []iptestResult, status, message string)
 	nsbRunResultSink.Unlock()
 }
 
-func emitNSBRunResults(results []iptestResult, status, message string) {
+// emitNSBRunResults 把结果交给注册的 sinks；返回 true 表示已被批量流程接管。
+func emitNSBRunResults(results []iptestResult, status, message string) bool {
 	nsbRunResultSink.Lock()
 	fn := nsbRunResultSink.fn
 	nsbRunResultSink.Unlock()
 	if fn != nil {
 		fn(results, status, message)
+		return true
 	}
+	return false
 }
 
 // 最近一次多来源执行的结果，供「立即推送」复用。

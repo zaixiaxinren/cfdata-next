@@ -1657,17 +1657,6 @@
                 仅作用于下载 ASN 库/locations、版本检查、GitHub/订阅上传等管理操作；扫描与测速保持直连。程序配置优先生效，未配置时使用系统环境变量代理。
             </div>
 
-            <div class="settings-title" style="margin-top:12px;">📚 多来源 IP（一行一个）</div>
-            <textarea id="sourceList" rows="4" placeholder="名称|地址|端口|TLS&#10;例如：&#10;主力|https://example.com/ip.txt|443|1&#10;备用|/data/backup.txt" style="width:100%;margin-top:2px;font-size:12px;font-family:monospace;"></textarea>
-            <div class="theme-options" style="display:flex;gap:8px;margin-top:6px;">
-                <button class="menu-btn" style="flex:1;" onclick="saveSources()">保存来源</button>
-                <button class="menu-btn" style="flex:1;" onclick="runMultiSource()">▶ 跑全部来源</button>
-            </div>
-            <div class="upload-status" id="sourceStatusText">暂无来源</div>
-            <div style="font-size:11px;line-height:1.5;color:var(--text-secondary);margin-top:4px;">
-                端口可省略（用 443），TLS 填 1/0，可省略（默认 1）。本地文件路径直接写绝对路径。
-            </div>
-
             <div class="settings-title" style="margin-top:12px;">☁️ CFNext 推送</div>
             <input id="cfnextUrl" type="text" placeholder="面板入口 https://xxx.workers.dev/xxxx" style="width:100%;margin-top:2px;">
             <input id="cfnextPassword" type="password" placeholder="面板密码（留空表示不修改）" style="width:100%;margin-top:6px;">
@@ -1692,6 +1681,9 @@
             <div class="upload-status" id="cfnextStatusText">未配置</div>
 
             <div class="settings-title" style="margin-top:12px;">⏱ 定时测速</div>
+            <div style="font-size:11px;line-height:1.5;color:var(--text-secondary);margin-bottom:6px;">
+                定时任务使用页面上「网络 URL」和当前非标参数运行。配置好参数后，请到「💾 保存配置 → 保存当前配置（含定时来源）」同步一次。
+            </div>
             <label style="display:flex;align-items:center;gap:6px;font-size:12px;">
                 <input id="scheduleEnabled" type="checkbox" onchange="toggleScheduleMode()"> 启用容器内定时
             </label>
@@ -1716,7 +1708,7 @@
 
         <div id="configMenu" class="settings-menu hidden">
             <div class="settings-title">💾 保存配置</div>
-            <button class="menu-btn" onclick="saveConfigToLS()">保存当前配置</button>
+            <button class="menu-btn" onclick="saveConfigToLS()">保存当前配置（含定时来源）</button>
 
             <div class="settings-title" style="margin-top:12px;">📂 加载配置</div>
             <button class="menu-btn" onclick="loadConfigFromLS()">加载保存配置</button>
@@ -2953,6 +2945,9 @@
                 return;
             }
             log('当前配置已保存到 localStorage');
+            if (wsSend({ type: 'page_config_save', data: pageConfigPayload() })) {
+                log('页面参数已同步到服务器，定时任务将使用同一份网络 URL 与参数');
+            }
         }
 
         function loadConfigFromLS() {
@@ -6341,47 +6336,33 @@
             link.click();
         }
 
-        // ===== 面板扩展：多来源 / CFNext 推送 / 定时任务 =====
+        // ===== 面板扩展：CFNext 推送 / 定时任务 =====
         let panelState = { sources: [], cfnext: {}, schedule: {}, runner: {}, state: {} };
 
-        function formatSources(sources) {
-            return (sources || []).map(s => {
-                const parts = [s.name || '', s.url || ''];
-                if (s.port) parts.push(String(s.port));
-                if (s.tls) parts.push('1');
-                return parts.join('|');
-            }).join('\n');
-        }
-
-        function parseSources(text) {
-            const out = [];
-            (text || '').split('\n').forEach(rawLine => {
-                const line = rawLine.trim();
-                if (!line || line.startsWith('#')) return;
-                const f = line.split('|').map(x => x.trim());
-                let name = '', url = '', port = 0, tls = true;
-                if (f.length >= 2) { name = f[0]; url = f[1]; } else { url = f[0]; }
-                if (f.length >= 3 && f[2]) port = parseInt(f[2], 10) || 0;
-                if (f.length >= 4 && f[3] !== '') tls = !(f[3] === '0' || f[3].toLowerCase() === 'false');
-                if (!url) return;
-                out.push({ name: name || url.slice(0, 32), url, port, tls, enabled: true });
-            });
-            return out;
+        // pageConfigPayload 把页面「非标参数」转成服务端需要的类型，供定时任务复用。
+        function pageConfigPayload() {
+            const n = readFormValues().nsb;
+            const num = (v) => parseInt(v, 10) || 0;
+            return {
+                nsb: {
+                    sourceUrl: n.sourceUrl || '',
+                    threads: num(n.threads),
+                    delay: num(n.delay),
+                    resultLimit: num(n.resultLimit),
+                    fallbackPort: num(n.fallbackPort),
+                    speedTest: n.enableSpeed === 'on' ? num(n.speedTest) : 0,
+                    speedMin: parseFloat(n.speedMin) || 0,
+                    speedLimit: num(n.speedLimit),
+                    scanMode: n.scanMode || 'tcping',
+                    tls: n.tls !== 'off',
+                    speedUrl: n.speedUrl || 'auto',
+                    outFile: n.outFile || 'cfdata-merged.csv',
+                }
+            };
         }
 
         function applyPanelData(d) {
             panelState = d || {};
-            const srcEl = document.getElementById('sourceList');
-            if (srcEl && document.activeElement !== srcEl) srcEl.value = formatSources(d.sources);
-            const srcStatus = document.getElementById('sourceStatusText');
-            if (srcStatus) {
-                const n = (d.sources || []).length;
-                const st = d.state || {};
-                srcStatus.textContent = n === 0
-                    ? '暂无来源'
-                    : `已配置 ${n} 个来源` + (st.lastBatchAt ? `，上次执行 ${st.lastBatchAt}（${st.resultCount || 0} 条结果）` : '');
-            }
-
             const cf = d.cfnext || {};
             const urlEl = document.getElementById('cfnextUrl');
             if (urlEl && document.activeElement !== urlEl) urlEl.value = cf.panelUrl || '';
@@ -6433,16 +6414,6 @@
             const dailyRow = document.getElementById('scheduleDailyRow');
             if (intervalRow) intervalRow.style.display = mode === 'daily' ? 'none' : '';
             if (dailyRow) dailyRow.style.display = mode === 'daily' ? '' : 'none';
-        }
-
-        function saveSources() {
-            const el = document.getElementById('sourceList');
-            const sources = parseSources(el ? el.value : '');
-            wsSend({ type: 'sources_save', data: { sources } });
-        }
-
-        function runMultiSource() {
-            wsSend({ type: 'run_multisource', data: {} });
         }
 
         function cfnextFormData() {
