@@ -1707,24 +1707,16 @@
         </div>
 
         <div id="configMenu" class="settings-menu hidden">
-            <div class="settings-title">💾 保存配置</div>
-            <button class="menu-btn" onclick="saveConfigToLS()">保存当前配置（含定时来源）</button>
+            <div class="settings-title">💾 保存配置（服务端）</div>
+            <button class="menu-btn" onclick="saveConfigToLS()">保存到服务器（含定时来源）</button>
+            <button class="menu-btn" style="margin-top:6px;" onclick="reloadFromServer()">从服务器重新加载</button>
+            <div class="upload-status" id="configSavedAtText">服务器上还没有保存过配置</div>
 
-            <div class="settings-title" style="margin-top:12px;">📂 加载配置</div>
-            <button class="menu-btn" onclick="loadConfigFromLS()">加载保存配置</button>
-
-            <div class="settings-title" style="margin-top:12px;">🔄 自动加载配置</div>
-            <select id="configAutoLoad" onchange="saveAutoLoadPreference(this.value)" style="width:100%;">
-                <option value="off">关闭</option>
-                <option value="localStorage">localStorage</option>
-                <option value="configFile">本地配置文件</option>
-            </select>
-
-            <div class="settings-title" style="margin-top:12px;">📄 从服务器同步</div>
-            <button class="menu-btn" onclick="loadConfigFromServer()">从服务器同步配置</button>
+            <div class="settings-title" style="margin-top:12px;">⚙️ 自动保存</div>
+            <div class="upload-status">改动参数或后缀后会自动写入服务器（约 1 秒），无需手动点保存</div>
 
             <div class="settings-title" style="margin-top:12px;">🗑️ 管理</div>
-            <button class="danger-btn" onclick="deleteSavedConfig()">删除保存配置</button>
+            <button class="danger-btn" onclick="deleteSavedConfig()">清空服务器上的来源</button>
         </div>
 
         <div class="status-bar" id="status">正在连接服务器...</div>
@@ -2167,6 +2159,20 @@
                     <div class="modal-field full">
                         <label>自定义字段</label>
                         <input id="resultCustomFields" type="text" placeholder="标题:内容，多项用逗号分隔，例如 备注:测试版,归属:cfdata" oninput="handleCustomResultFieldsChange()">
+                    </div>
+                    <div class="modal-field full" id="resultIPSuffixField">
+                        <label>IP 后缀（拼接为 IP:PORT#后缀）</label>
+                        <div class="separator-row">
+                            <select id="resultIPSuffixMode" onchange="handleIPSuffixModeChange()">
+                                <option value="dc" selected>数据中心（如 LAX）</option>
+                                <option value="custom">固定文本</option>
+                                <option value="none">不加后缀</option>
+                            </select>
+                            <input id="resultIPSuffixText" type="text" placeholder="固定文本，可用 {dc} 引用数据中心" oninput="updateResultPreview()">
+                        </div>
+                        <div style="font-size:11px;line-height:1.5;color:var(--text-secondary);margin-top:4px;">
+                            导出与「推送到 CFNext 面板」共用这段后缀：面板订阅里的节点名就是 # 后面这一节。点右上角 💾 保存后，刷新页面和定时任务都会沿用。
+                        </div>
                     </div>
                     <div class="modal-field full" id="resultTextSeparatorField">
                         <label>TXT 字段分隔符</label>
@@ -2640,8 +2646,7 @@
             const menu = document.getElementById('configMenu');
             menu.classList.toggle('hidden');
             if (!menu.classList.contains('hidden')) {
-                const pref = localStorage.getItem('cfdata-autoload') || 'off';
-                document.getElementById('configAutoLoad').value = pref;
+                renderSavedAt(panelState.savedAt);
             }
         }
 
@@ -2936,18 +2941,89 @@
             updateNSBCompactToggle();
         }
 
-        function saveConfigToLS() {
-            const config = readFormValues();
-            try {
-                localStorage.setItem('cfdata-config', JSON.stringify(config));
-            } catch (e) {
-                showNoticeCard('保存配置失败: ' + (e.message || String(e)));
+        // ===== 配置以服务端 panel-config.json 为唯一真源 =====
+        // 保存 → 写服务器；刷新/重载 → 从服务器回填；参数改动 → 防抖自动保存。
+        let autoSaveTimer = null;
+        let autoSaveReady = false;
+        let autoSaveSuspended = false;
+        let autoSavePending = false;
+
+        function renderSavedAt(text) {
+            const el = document.getElementById('configSavedAtText');
+            if (!el) return;
+            if (!text) {
+                el.textContent = '服务器上还没有保存过配置';
                 return;
             }
-            log('当前配置已保存到 localStorage');
-            if (wsSend({ type: 'page_config_save', data: pageConfigPayload() })) {
-                log('页面参数已同步到服务器，定时任务将使用同一份网络 URL 与参数');
+            const d = new Date(text);
+            const label = isNaN(d.getTime()) ? text : d.toLocaleString('zh-CN', { hour12: false });
+            el.textContent = '服务器已保存：' + label;
+        }
+
+        function reloadFromServer() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                showNoticeCard('与服务端的连接尚未就绪，请等"已连接服务器"后再试');
+                return;
             }
+            pendingForceHydrate = true;
+            if (!wsSend({ type: 'panel_get' })) {
+                pendingForceHydrate = false;
+                showNoticeCard('请求服务器配置失败');
+                return;
+            }
+            log('正在从服务器重新加载配置…');
+        }
+
+        function isAutoSaveField(id) {
+            if (!id) return false;
+            return /^nsb[A-Z]/.test(id) || /^result[A-Z]/.test(id);
+        }
+
+        function scheduleAutoSave(id) {
+            if (!autoSaveReady || autoSaveSuspended || !ws || ws.readyState !== WebSocket.OPEN) return;
+            autoSavePending = true;
+            const delay = id === 'nsbSourceUrl' ? 2000 : 900;
+            clearTimeout(autoSaveTimer);
+            autoSaveTimer = setTimeout(flushAutoSave, delay);
+        }
+
+        function flushAutoSave() {
+            autoSaveTimer = null;
+            if (!autoSaveReady || autoSaveSuspended || !autoSavePending) return;
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            autoSavePending = false;
+            const payload = pageConfigPayload();
+            // 页面 URL 为空但服务器有来源时不重建 sources，避免把定时来源冲掉。
+            const urlEmpty = !String(payload.nsb.sourceUrl || '').trim();
+            const serverSources = Array.isArray(panelState.sources) ? panelState.sources.length : 0;
+            payload.preserveSources = urlEmpty && serverSources > 0;
+            payload.silent = true;
+            wsSend({ type: 'page_config_save', data: payload });
+        }
+
+        function saveConfigToLS() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                showNoticeCard('与服务端的连接尚未就绪，请等"已连接服务器"后再试');
+                return;
+            }
+            const config = readFormValues();
+            const serverSources = Array.isArray(panelState.sources) ? panelState.sources.length : 0;
+            if (!String(config.nsb.sourceUrl || '').trim() && serverSources > 0) {
+                const ok = confirm('页面「网络 URL」现在是空的，保存会清空服务器上已有的 ' + serverSources + ' 个定时来源。\n\n如果只是刷新后还没回显，请先取消，然后点「从服务器重新加载」。\n仍要保存吗？');
+                if (!ok) return;
+            }
+            const payload = pageConfigPayload();
+            payload.preserveSources = false;
+            if (!wsSend({ type: 'page_config_save', data: payload })) {
+                showNoticeCard('保存失败：与服务端的连接已断开');
+                return;
+            }
+            log('正在保存配置到服务器…');
+            // 本地仅保留一份镜像，便于断网时查看，不再作为恢复来源。
+            try {
+                localStorage.setItem('cfdata-config', JSON.stringify(config));
+                localStorage.setItem('cfdata-export-config', JSON.stringify(collectExportConfig()));
+            } catch (_) {}
         }
 
         function loadConfigFromLS() {
@@ -2964,11 +3040,13 @@
             }
             try {
                 applyConfigValues(JSON.parse(raw));
+                const exportRaw = localStorage.getItem('cfdata-export-config');
+                if (exportRaw) applyExportConfig(JSON.parse(exportRaw));
             } catch (e) {
                 showNoticeCard('解析配置失败: ' + (e.message || String(e)));
                 return;
             }
-            log('配置文件已从 localStorage 加载');
+            log('配置文件已从 localStorage 加载（含结果操作导出/后缀设置）');
         }
 
         function mapCLIConfigToForm(cliCfg) {
@@ -3021,49 +3099,25 @@
         }
 
         function deleteSavedConfig() {
-            if (!confirm('确定要删除保存的配置吗？')) return;
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                showNoticeCard('与服务端的连接尚未就绪');
+                return;
+            }
+            if (!confirm('确定要清空服务器上保存的网络来源吗？\n\n测速参数、后缀设置和推送设置会保留。')) return;
+            wsSend({ type: 'sources_save', data: { sources: [] } });
+            const urlEl = document.getElementById('nsbSourceUrl');
+            if (urlEl) urlEl.value = '';
             try {
                 localStorage.removeItem('cfdata-config');
-                localStorage.removeItem('cfdata-autoload');
-            } catch (e) {
-                showNoticeCard('删除配置失败: ' + (e.message || String(e)));
-                return;
-            }
-            showNoticeCard('保存的配置已删除');
+                localStorage.removeItem('cfdata-export-config');
+            } catch (_) {}
         }
 
-        function saveAutoLoadPreference(value) {
-            try {
-                localStorage.setItem('cfdata-autoload', value);
-            } catch (e) {
-                showNoticeCard('保存自动加载偏好失败');
-            }
-        }
-
-        function autoLoadConfig() {
-            let pref;
-            try {
-                pref = localStorage.getItem('cfdata-autoload');
-            } catch (e) {
-                return;
-            }
-            if (!pref || pref === 'off') return;
-            try {
-                if (pref === 'localStorage') {
-                    const raw = localStorage.getItem('cfdata-config');
-                    if (raw) {
-                        applyConfigValues(JSON.parse(raw));
-                    }
-                } else if (pref === 'configFile') {
-                    wsSend({ type: 'get_config' });
-                }
-            } catch (e) {
-                console.error('[cfdata] autoLoadConfig failed:', e);
-            }
-        }
+        // 旧版本的「自动加载配置」已下线：现在统一以服务端 panel-config.json 为准，
+        // 页面首次连上就会自动回填，见 hydrateNSBFormFromPanel。
 
         function loadConfigFromServer() {
-            wsSend({ type: 'get_config' });
+            reloadFromServer();
         }
 
         function wsSend(payload) {
@@ -5167,6 +5221,7 @@
             if (!resultFieldOrder.length) resultFieldOrder = getDefaultResultFieldOrder(document.getElementById('resultFormat').value);
             renderGitHubAccounts();
             renderResultFieldOptions();
+            handleIPSuffixModeChange();
             document.getElementById('resultModalMask').classList.add('active');
         }
 
@@ -5764,6 +5819,7 @@
             if (checked && !resultFieldOrder.includes(key)) resultFieldOrder.push(key);
             if (!checked) resultFieldOrder = resultFieldOrder.filter((k) => k !== key);
             renderResultOrderList();
+            scheduleAutoSave('resultFieldOrder');
         }
 
         function moveResultField(index, delta) {
@@ -5771,11 +5827,13 @@
             if (next < 0 || next >= resultFieldOrder.length) return;
             [resultFieldOrder[index], resultFieldOrder[next]] = [resultFieldOrder[next], resultFieldOrder[index]];
             renderResultFieldOptions();
+            scheduleAutoSave('resultFieldOrder');
         }
 
         function selectResultFields(all) {
             resultFieldOrder = all ? getAllResultFieldOrder() : ['ipport'];
             renderResultFieldOptions();
+            scheduleAutoSave('resultFieldOrder');
         }
 
         function getAvailableResultFieldKeys() {
@@ -5945,11 +6003,7 @@
             const rows = getSelectedCopyRows();
             if (!rows.length) return '暂无预览';
             const fields = copyFieldOrder.length ? copyFieldOrder : getDefaultResultFieldOrderFor(copyModalMode, 'txt');
-            const first = rows[0];
-            const ipport = first.ip ? formatIPPort(first.ip, first.port, useIPv6BracketsFor('copy')) : (first.ipport || `${first.ip || ''}:${first.port || ''}`);
-            const extras = fields.filter((key) => key !== 'ipport').map((key) => first[key]).filter((value) => String(value ?? '').trim() !== '');
-            const separator = getTextSeparator('copy');
-            return extras.length ? `${ipport}#${extras.join(separator)}` : ipport;
+            return buildTxtResultLine(rows[0], fields, getTextSeparator('copy'), useIPv6BracketsFor('copy'));
         }
 
         function updateCopyPreview() {
@@ -6087,14 +6141,45 @@
             return raw;
         }
 
+        // resolveIPSuffix 统一计算「# 后面第一节」：导出与 CFNext 推送共用同一份设置。
+        function resolveIPSuffix(row) {
+            const mode = document.getElementById('resultIPSuffixMode')?.value || 'dc';
+            const dc = String(row?.dc ?? row?.数据中心 ?? '').trim();
+            if (mode === 'none') return '';
+            if (mode === 'custom') {
+                const text = (document.getElementById('resultIPSuffixText')?.value || '').trim();
+                if (!text) return dc;
+                return text.replaceAll('{dc}', dc || 'CF');
+            }
+            return dc;
+        }
+
+        function handleIPSuffixModeChange() {
+            const mode = document.getElementById('resultIPSuffixMode')?.value || 'dc';
+            const text = document.getElementById('resultIPSuffixText');
+            if (text) {
+                text.disabled = mode !== 'custom';
+                text.style.opacity = mode === 'custom' ? '1' : '.5';
+            }
+            updateResultPreview();
+        }
+
+        // buildTxtResultLine 生成一行 TXT：IP:PORT#后缀<分隔符>其它字段。
+        function buildTxtResultLine(row, fields, textSeparator, useBrackets) {
+            const ipport = row.ip ? formatIPPort(row.ip, row.port, useBrackets) : (row.ipport || `${row.ip || ''}:${row.port || ''}`);
+            const suffix = resolveIPSuffix(row);
+            const extras = fields
+                .filter((k) => k !== 'ipport' && !(suffix && k === 'dc'))
+                .map((k) => row[k])
+                .filter((v) => String(v ?? '').trim() !== '');
+            const parts = suffix ? [suffix, ...extras] : extras;
+            return parts.length ? `${ipport}#${parts.join(textSeparator)}` : ipport;
+        }
+
         function buildResultContent(format, rows, fields, textSeparator = '-', useBrackets = true) {
             if (!rows.length) throw new Error('暂无可操作结果');
             if (format === 'txt') {
-                return rows.map((r) => {
-                    const ipport = r.ip ? formatIPPort(r.ip, r.port, useBrackets) : (r.ipport || `${r.ip || ''}:${r.port || ''}`);
-                    const extras = fields.filter((k) => k !== 'ipport').map((k) => r[k]).filter((v) => String(v ?? '').trim() !== '');
-                    return extras.length ? `${ipport}#${extras.join(textSeparator)}` : ipport;
-                }).join('\n') + '\n';
+                return rows.map((r) => buildTxtResultLine(r, fields, textSeparator, useBrackets)).join('\n') + '\n';
             }
             const byKey = Object.fromEntries(RESULT_FIELDS.concat(resultCustomFields).map((f) => [f.key, f]));
             const headers = fields.map((k) => byKey[k]?.label || k);
@@ -6140,9 +6225,7 @@
             const fields = resultFieldOrder.length ? resultFieldOrder : getDefaultResultFieldOrder(format);
             const first = rows[0];
             if (format === 'txt') {
-                const ipport = first.ip ? formatIPPort(first.ip, first.port, useIPv6BracketsFor('result')) : (first.ipport || `${first.ip || ''}:${first.port || ''}`);
-                const extras = fields.filter((k) => k !== 'ipport').map((k) => first[k]).filter((v) => String(v ?? '').trim() !== '');
-                return extras.length ? `${ipport}#${extras.join(getTextSeparator('result'))}` : ipport;
+                return buildTxtResultLine(first, fields, getTextSeparator('result'), useIPv6BracketsFor('result'));
             }
             const byKey = Object.fromEntries(RESULT_FIELDS.concat(resultCustomFields).map((f) => [f.key, f]));
             const headers = fields.map((k) => byKey[k]?.label || k).join(',');
@@ -6340,6 +6423,74 @@
         let panelState = { sources: [], cfnext: {}, schedule: {}, runner: {}, state: {} };
 
         // pageConfigPayload 把页面「非标参数」转成服务端需要的类型，供定时任务复用。
+        // collectExportConfig 收集「结果操作」弹窗里的导出设置，随保存同步到服务端。
+        function collectExportConfig() {
+            return {
+                format: document.getElementById('resultFormat')?.value || 'txt',
+                fields: Array.isArray(resultFieldOrder) ? resultFieldOrder.slice() : [],
+                separator: getTextSeparator('result'),
+                ipv6Brackets: useIPv6BracketsFor('result'),
+                customFields: document.getElementById('resultCustomFields')?.value || '',
+                suffixMode: document.getElementById('resultIPSuffixMode')?.value || 'dc',
+                suffixText: (document.getElementById('resultIPSuffixText')?.value || '').trim(),
+            };
+        }
+
+        function setTextSeparator(prefix, value) {
+            const sep = value === ' ' ? ' ' : String(value ?? '-');
+            const custom = document.getElementById(`${prefix}TextSeparatorCustom`);
+            const preset = document.getElementById(`${prefix}TextSeparatorPreset`);
+            if (custom) custom.value = sep === ' ' ? '空格' : sep;
+            if (preset) {
+                const known = Array.from(preset.options).some((o) => o.value === sep && o.value !== 'custom');
+                preset.value = sep === ' ' ? 'space' : (known ? sep : 'custom');
+            }
+        }
+
+        // applyExportConfig 回显导出设置：既用于页面刷新，也用于服务端 panel_data 回传。
+        function applyExportConfig(exp) {
+            if (!exp || typeof exp !== 'object') return;
+            const fmt = document.getElementById('resultFormat');
+            if (fmt && (exp.format === 'txt' || exp.format === 'csv')) fmt.value = exp.format;
+            if (Array.isArray(exp.fields) && exp.fields.length) {
+                resultFieldOrder = exp.fields.map(String).filter(Boolean);
+            }
+            if (exp.separator) setTextSeparator('result', exp.separator);
+            const brackets = document.getElementById('resultIPv6Brackets');
+            if (brackets && exp.ipv6Brackets !== undefined) brackets.checked = exp.ipv6Brackets !== false;
+            const customInput = document.getElementById('resultCustomFields');
+            if (customInput && typeof exp.customFields === 'string' && exp.customFields !== customInput.value) {
+                customInput.value = exp.customFields;
+                handleCustomResultFieldsChange();
+            }
+            const modeSel = document.getElementById('resultIPSuffixMode');
+            if (modeSel && exp.suffixMode) modeSel.value = exp.suffixMode;
+            const textInput = document.getElementById('resultIPSuffixText');
+            if (textInput && typeof exp.suffixText === 'string') textInput.value = exp.suffixText;
+            handleIPSuffixModeChange();
+        }
+
+        function restoreExportConfigFromStorage() {
+            try {
+                const raw = localStorage.getItem('cfdata-export-config');
+                if (raw) applyExportConfig(JSON.parse(raw));
+            } catch (e) {
+                console.warn('[cfdata] 读取导出设置失败:', e);
+            }
+        }
+
+        // 刷新后恢复「官方详细测试」区域的参数：服务端不存这块，只存在本地缓存里。
+        function restoreOfficialParamsFromStorage() {
+            try {
+                const raw = localStorage.getItem('cfdata-config');
+                if (!raw) return;
+                const cfg = JSON.parse(raw);
+                if (cfg && cfg.official) applyConfigValues({ official: cfg.official });
+            } catch (e) {
+                console.warn('[cfdata] 读取官方测速参数失败:', e);
+            }
+        }
+
         function pageConfigPayload() {
             const n = readFormValues().nsb;
             const num = (v) => parseInt(v, 10) || 0;
@@ -6357,13 +6508,101 @@
                     tls: n.tls !== 'off',
                     speedUrl: n.speedUrl || 'auto',
                     outFile: n.outFile || 'cfdata-merged.csv',
-                }
+                },
+                export: collectExportConfig(),
             };
+        }
+
+        // 配置以服务端 panel-config.json 为唯一真源：首次收到 panel_data 时把表单
+        // 对齐到服务器保存的那份；点「从服务器重新加载」时强制再对齐一次。
+        let panelFormHydrated = false;
+        let pendingForceHydrate = false;
+        function hydrateNSBFormFromPanel(d, force) {
+            if (panelFormHydrated && !force) return;
+            panelFormHydrated = true;
+            autoSaveSuspended = true; // 程序化赋值期间不触发自动保存
+            try {
+                const r = d.runner || {};
+                const sources = Array.isArray(d.sources) ? d.sources : [];
+                // 以「服务端有没有网络来源」作为是否回填的判据：
+                // 没有来源时页面保持自身默认值，避免用后端默认值悄悄改掉用户的输入。
+                const hasServerConfig = sources.length > 0;
+                renderSavedAt(d.savedAt);
+                if (!hasServerConfig) {
+                    // 服务器上还没保存过任何配置，别用服务端默认值去覆盖页面；
+                    // 但浏览器里若有旧配置，顺手迁移到服务端，之后就以服务端为准。
+                    migrateLocalConfigToServer();
+                    return;
+                }
+                const setNum = (id, value) => {
+                    const el = document.getElementById(id);
+                    if (el && value !== undefined && value !== null && String(value) !== '') el.value = value;
+                };
+                const sourceInput = document.getElementById('nsbSourceUrl');
+                if (sourceInput) {
+                    sourceInput.value = sources.map((s) => (s.url || '').trim()).filter(Boolean).join('\n');
+                }
+                setNum('nsbThreads', r.threads);
+                setNum('nsbDelay', r.delay);
+                setNum('nsbResultLimit', r.resultLimit);
+                setNum('nsbFallbackPort', r.fallbackPort);
+                setNum('nsbSpeedMin', r.speedMin);
+                setNum('nsbSpeedLimit', r.speedLimit);
+                setNum('nsbOutFile', r.outFile);
+                const scanSel = document.getElementById('nsbScanMode');
+                if (scanSel && r.scanMode) scanSel.value = r.scanMode;
+                if (r.speedTest !== undefined) {
+                    const enableSel = document.getElementById('nsbEnableSpeed');
+                    if (enableSel) enableSel.value = r.speedTest > 0 ? 'on' : 'off';
+                    if (r.speedTest > 0) setNum('nsbSpeedTest', r.speedTest);
+                }
+                if (sources.length) {
+                    const tlsSel = document.getElementById('nsbTls');
+                    if (tlsSel) tlsSel.value = sources[0].tls === false ? 'off' : 'on';
+                }
+                if (r.speedUrl) applySpeedUrlConfig('nsbSpeedUrl', 'nsbSpeedUrlPreset', r.speedUrl);
+                updateNSBSpeedControls();
+                updateNSBCompactToggle();
+                const when = d.savedAt ? '，保存于 ' + new Date(d.savedAt).toLocaleString('zh-CN', { hour12: false }) : '';
+                log(`已从服务器加载配置：${sources.length} 个网络来源${when}`);
+            } finally {
+                setTimeout(() => { autoSaveSuspended = false; }, 500);
+            }
+        }
+
+        // 服务器上还没有配置时，把浏览器缓存里的旧配置搬上去（一次性）。
+        function migrateLocalConfigToServer() {
+            let raw = null;
+            try {
+                raw = localStorage.getItem('cfdata-config');
+            } catch (_) {
+                return;
+            }
+            if (!raw) return;
+            let cfg;
+            try {
+                cfg = JSON.parse(raw);
+            } catch (_) {
+                return;
+            }
+            const nsb = (cfg && cfg.nsb) || {};
+            if (!String(nsb.sourceUrl || '').trim()) return;
+            applyConfigValues(cfg);
+            const payload = pageConfigPayload();
+            payload.preserveSources = false;
+            if (wsSend({ type: 'page_config_save', data: payload })) {
+                log('浏览器里存在旧配置，已自动迁移到服务器（' + String(nsb.sourceUrl).split('\n').filter(Boolean).length + ' 个网络来源）');
+            }
         }
 
         function applyPanelData(d) {
             panelState = d || {};
             const cf = d.cfnext || {};
+            const forceHydrate = pendingForceHydrate;
+            pendingForceHydrate = false;
+            const hasServerSaved = Array.isArray(d.sources) && d.sources.length > 0;
+            // 导出/后缀设置只在首次加载或手动重载时套用，避免打断正在编辑的弹窗。
+            if (d.export && (forceHydrate || (!panelFormHydrated && hasServerSaved))) applyExportConfig(d.export);
             const urlEl = document.getElementById('cfnextUrl');
             if (urlEl && document.activeElement !== urlEl) urlEl.value = cf.panelUrl || '';
             const pwdEl = document.getElementById('cfnextPassword');
@@ -6405,6 +6644,7 @@
                     schStatus.textContent = (st.nextRun ? `下次执行 ${st.nextRun}` : '已启用') + (sch.lastResult ? `｜${sch.lastResult}` : '');
                 }
             }
+            hydrateNSBFormFromPanel(d, forceHydrate);
         }
 
         function toggleScheduleMode() {
@@ -6471,7 +6711,7 @@
                     applySpeedURLStatus(msg.data.speedURLStatus);
                     applyProxyStatus(msg.data.proxyStatus);
                     renderVersionInfo(msg.data || {});
-                    autoLoadConfig();
+                    // 配置以服务端 panel-config.json 为准，这里统一走 panel_get。
                     wsSend({ type: 'panel_get' });
                     break;
                 case 'speed_url_status':
@@ -6499,6 +6739,14 @@
                     break;
                 case 'panel_data':
                     applyPanelData(msg.data || {});
+                    // 首次回填完成后才允许自动保存，避免用页面默认值覆盖服务器配置。
+                    setTimeout(() => { autoSaveReady = true; }, 800);
+                    break;
+                case 'page_config_saved':
+                    if (msg.data && msg.data.savedAt) {
+                        panelState.savedAt = msg.data.savedAt;
+                        renderSavedAt(msg.data.savedAt);
+                    }
                     break;
                 case 'panel_saved':
                     log((msg.data && msg.data.message) || '设置已保存');
@@ -6935,6 +7183,17 @@
             }
         }
 
+        // 表单改动后自动同步到服务器：非标测速参数与结果操作（导出/后缀）共用一条链路。
+        function bindAutoSaveListeners() {
+            const handler = (e) => {
+                const el = e.target;
+                if (!el || !el.id || !isAutoSaveField(el.id)) return;
+                scheduleAutoSave(el.id);
+            };
+            document.addEventListener('input', handler, true);
+            document.addEventListener('change', handler, true);
+        }
+
         window.addEventListener('DOMContentLoaded', () => {
             connect();
             initializeUI();
@@ -6942,6 +7201,9 @@
             renderEdgetunnelAccounts();
             switchMode('official');
             initThemeFromStorage();
+            restoreOfficialParamsFromStorage();
+            restoreExportConfigFromStorage();
+            bindAutoSaveListeners();
         });
 
         function autoThemeBySystem() {

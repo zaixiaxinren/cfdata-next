@@ -60,6 +60,17 @@ type scheduleConfig struct {
 	LastResult      string `json:"lastResult"`
 }
 
+// exportConfig 结果操作的导出/后缀设置，随页面保存持久化，供定时任务与 CFNext 推送沿用。
+type exportConfig struct {
+	Format       string   `json:"format"`       // txt | csv
+	Fields       []string `json:"fields"`       // 导出字段顺序（前端字段 key）
+	Separator    string   `json:"separator"`    // TXT 字段分隔符
+	IPv6Brackets bool    `json:"ipv6Brackets"` // IPv6 是否加方括号
+	CustomFields string   `json:"customFields"` // 形如 备注:测试版
+	SuffixMode   string   `json:"suffixMode"`   // dc（数据中心）| custom（固定文本）| none（不加）
+	SuffixText   string   `json:"suffixText"`   // 固定文本，支持 {dc} 占位符
+}
+
 // runnerConfig 多来源批量执行的统一参数。
 type runnerConfig struct {
 	Threads      int     `json:"threads"`
@@ -75,10 +86,12 @@ type runnerConfig struct {
 }
 
 type panelConfig struct {
-	Sources  []ipSource     `json:"sources"`
-	CFNext   cfnextConfig   `json:"cfnext"`
-	Schedule scheduleConfig `json:"schedule"`
-	Runner   runnerConfig   `json:"runner"`
+	Sources   []ipSource     `json:"sources"`
+	CFNext    cfnextConfig   `json:"cfnext"`
+	Schedule  scheduleConfig `json:"schedule"`
+	Runner    runnerConfig   `json:"runner"`
+	Export    exportConfig   `json:"export"`
+	UpdatedAt string         `json:"updatedAt"` // 最后一次页面保存时间（RFC3339），前端用来显示「已保存」
 }
 
 var panelConfigState = struct {
@@ -110,6 +123,13 @@ func defaultPanelConfig() panelConfig {
 			FallbackPort: 443,
 			SpeedURL:     autoSpeedURLValue,
 			OutFile:      "cfdata-merged.csv",
+		},
+		Export: exportConfig{
+			Format:       "txt",
+			Fields:       []string{"ipport", "dc"},
+			Separator:    "-",
+			IPv6Brackets: true,
+			SuffixMode:   "dc",
 		},
 	}
 }
@@ -147,6 +167,27 @@ func normalizePanelConfig(cfg panelConfig) panelConfig {
 	}
 	if cfg.CFNext.MaxCount <= 0 {
 		cfg.CFNext.MaxCount = def.CFNext.MaxCount
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Export.Format)) {
+	case "csv":
+		cfg.Export.Format = "csv"
+	default:
+		cfg.Export.Format = "txt"
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Export.SuffixMode)) {
+	case "custom":
+		cfg.Export.SuffixMode = "custom"
+	case "none":
+		cfg.Export.SuffixMode = "none"
+	default:
+		cfg.Export.SuffixMode = "dc"
+	}
+	cfg.Export.SuffixText = strings.TrimSpace(cfg.Export.SuffixText)
+	if len(cfg.Export.Fields) == 0 {
+		cfg.Export.Fields = def.Export.Fields
+	}
+	if strings.TrimSpace(cfg.Export.Separator) == "" {
+		cfg.Export.Separator = def.Export.Separator
 	}
 	if cfg.Schedule.Mode != "daily" {
 		cfg.Schedule.Mode = "interval"
@@ -205,7 +246,7 @@ func itoa(v int) string {
 func loadPanelConfig() panelConfig {
 	panelConfigState.RLock()
 	loaded := panelConfigState.cfg
-	hasLoaded := len(loaded.Sources) > 0 || loaded.CFNext.PanelURL != "" || loaded.Schedule.LastRun != ""
+	hasLoaded := len(loaded.Sources) > 0 || loaded.CFNext.PanelURL != "" || loaded.Schedule.LastRun != "" || loaded.UpdatedAt != ""
 	panelConfigState.RUnlock()
 	if hasLoaded {
 		return loaded

@@ -904,7 +904,7 @@ func runNSBTask(ctx context.Context, session *appSession, fileName, fileContent,
 	if !emitNSBRunResults(nsbResults, completionStatus, completionMessage) && len(nsbResults) > 0 {
 		// 单次任务（非批量/定时）：缓存结果，供「立即推送上次结果」使用。
 		cfg := loadPanelConfig()
-		entries, _ := buildCFNextIPs(nsbResults, cfg.CFNext, "CF")
+		entries, _ := buildCFNextIPs(nsbResults, cfg.CFNext, cfg.Export, "CF")
 		setLastMultiSource(nsbResults, entries, fmt.Sprintf("单次任务 %d 条结果", len(nsbResults)))
 	}
 }

@@ -1,0 +1,10 @@
+data/
+*.exe
+*.log
+*.csv
+*.mmdb
+*.test
+/cfdata
+/cfdata-next
+__pycache__/
+.DS_Store

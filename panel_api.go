@@ -98,7 +98,13 @@ func panelWSHandlers(session *appSession) map[string]func(json.RawMessage) {
 		},
 		"page_config_save": func(data json.RawMessage) {
 			var params struct {
-				NSB pageNSBConfig `json:"nsb"`
+				NSB    pageNSBConfig `json:"nsb"`
+				Export *exportConfig `json:"export"`
+				// PreserveSources 为 true 时不重建 sources（自动保存只改了参数/后缀时用，
+				// 避免页面还没回显就把服务端已有的定时来源清空）。
+				PreserveSources bool `json:"preserveSources"`
+				// Silent 为 true 表示自动保存，不回推 panel_data，避免打断用户输入。
+				Silent bool `json:"silent"`
 			}
 			if err := json.Unmarshal(data, &params); err != nil {
 				session.sendWSMessage("error", "页面配置解析失败: "+err.Error())
@@ -106,18 +112,20 @@ func panelWSHandlers(session *appSession) map[string]func(json.RawMessage) {
 			}
 			nsb := params.NSB
 			cfg, err := updatePanelConfig(func(c *panelConfig) error {
-				urls := splitSourceURLs(nsb.SourceURL)
-				sources := make([]ipSource, 0, len(urls))
-				for i, u := range urls {
-					sources = append(sources, ipSource{
-						Name:    sourceDefaultName(u, i),
-						URL:     u,
-						Port:    nsb.FallbackPort,
-						TLS:     nsb.TLS,
-						Enabled: true,
-					})
+				if !params.PreserveSources {
+					urls := splitSourceURLs(nsb.SourceURL)
+					sources := make([]ipSource, 0, len(urls))
+					for i, u := range urls {
+						sources = append(sources, ipSource{
+							Name:    sourceDefaultName(u, i),
+							URL:     u,
+							Port:    nsb.FallbackPort,
+							TLS:     nsb.TLS,
+							Enabled: true,
+						})
+					}
+					c.Sources = sources
 				}
-				c.Sources = sources
 				c.Runner = runnerConfig{
 					Threads:      nsb.Threads,
 					Delay:        nsb.Delay,
@@ -130,15 +138,27 @@ func panelWSHandlers(session *appSession) map[string]func(json.RawMessage) {
 					SpeedURL:     nsb.SpeedURL,
 					OutFile:      nsb.OutFile,
 				}
+				if params.Export != nil {
+					c.Export = *params.Export
+				}
+				c.UpdatedAt = nowRFC3339()
 				return nil
 			})
 			if err != nil {
 				session.sendWSMessage("error", "保存页面配置失败: "+err.Error())
 				return
 			}
-			msg := fmt.Sprintf("页面配置已保存，定时任务将使用 %d 个网络来源", len(cfg.Sources))
+			if params.Silent {
+				session.sendWSMessage("page_config_saved", map[string]interface{}{
+					"silent":  true,
+					"savedAt": cfg.UpdatedAt,
+					"sources": len(cfg.Sources),
+				})
+				return
+			}
+			msg := fmt.Sprintf("已保存到服务器：%d 个网络来源", len(cfg.Sources))
 			if len(cfg.Sources) == 0 {
-				msg = "页面配置已保存；当前是本地文件模式，定时任务需要填写网络 URL 才能自动运行"
+				msg = "已保存到服务器；当前没有网络来源，定时任务需要填写网络 URL 才能自动运行"
 			}
 			session.sendWSMessage("panel_saved", map[string]interface{}{"message": msg})
 			session.sendWSMessage("panel_data", panelStatePayloadFrom(cfg))
@@ -244,6 +264,8 @@ func panelStatePayloadFrom(cfg panelConfig) map[string]interface{} {
 		"cfnext":   cfnext,
 		"runner":   cfg.Runner,
 		"schedule": cfg.Schedule,
+		"export":   cfg.Export,
+		"savedAt":  cfg.UpdatedAt,
 		"state": map[string]interface{}{
 			"hasPassword":      hasPassword,
 			"nextRun":          nextText,

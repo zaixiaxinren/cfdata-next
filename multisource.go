@@ -261,7 +261,7 @@ func runMultiSourcePipeline(ctx context.Context, cfg panelConfig, forward *appSe
 		notify("log", fmt.Sprintf("合并完成：%d 条原始 → %d 条去重，已导出 %s", len(all), len(merged), outFile))
 	}
 
-	entries, skipped := buildCFNextIPs(merged, cfg.CFNext, firstNonEmptyStr(strings.Join(summary.Sources, "/"), "CF"))
+	entries, skipped := buildCFNextIPs(merged, cfg.CFNext, cfg.Export, firstNonEmptyStr(strings.Join(summary.Sources, "/"), "CF"))
 	summary.Push = fmt.Sprintf("待推送 %d 条（跳过 %d 条）", len(entries), skipped)
 	setLastMultiSource(merged, entries, fmt.Sprintf("%d 条来源合并，共 %d 条结果", len(enabled), len(merged)))
 
@@ -271,9 +271,9 @@ func runMultiSourcePipeline(ctx context.Context, cfg panelConfig, forward *appSe
 // pushLastResults 推送最近一次结果（供「立即推送」使用）。
 func pushLastResults(ctx context.Context, cfg panelConfig) cfnextPushResult {
 	at, results, cached, _ := lastMultiSourceSnapshot()
-	if len(cached) == 0 && len(results) > 0 {
-		entries, _ := buildCFNextIPs(results, cfg.CFNext, "CF")
-		cached = entries
+	if len(results) > 0 {
+		// 每次都按当前设置重建条目：改完后缀/条数后，直接「立即推送」即可生效。
+		cached, _ = buildCFNextIPs(results, cfg.CFNext, cfg.Export, "CF")
 	}
 	if len(cached) == 0 {
 		return cfnextPushResult{OK: false, Message: "还没有可推送的结果，请先跑一次测速"}

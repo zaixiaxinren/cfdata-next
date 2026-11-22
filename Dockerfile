@@ -13,6 +13,10 @@ COPY index.html login.html favicon.png ca-certificates.crt ./
 
 RUN go build -trimpath -ldflags="-s -w" -o /out/cfdata .
 
+# 单元测试阶段（可选）：docker build --target test .
+FROM build AS test
+RUN go test -v ./...
+
 FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates tzdata && \

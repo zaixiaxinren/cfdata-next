@@ -314,8 +314,131 @@ type cfnextPushResult struct {
 	Skipped int    `json:"skipped"`
 }
 
+// cfnextFieldValue 按「结果操作」里的字段 key 取一条结果的值，格式与导出 CSV 一致。
+// 取不到时返回空串，调用方会跳过，避免拼出 `LAX--` 这种空节。
+func cfnextFieldValue(res iptestResult, key string) string {
+	switch key {
+	case "ip":
+		return strings.TrimSpace(res.ipAddr)
+	case "port":
+		if res.port > 0 {
+			return itoa(res.port)
+		}
+		return ""
+	case "tls":
+		if res.visitScheme == "https" {
+			return "true"
+		}
+		return "false"
+	case "lossRate":
+		return fmt.Sprintf("%.0f%%", res.lossRate*100)
+	case "latency":
+		return strings.TrimSpace(res.latency)
+	case "speed":
+		if speed := strings.TrimSpace(res.speedText); speed != "" {
+			return speed
+		}
+		if res.speedTested {
+			return fmt.Sprintf("%.2fMB/s", res.downloadSpeed/1024)
+		}
+		return ""
+	case "outboundIP":
+		return strings.TrimSpace(res.outboundIP)
+	case "ipType":
+		return strings.TrimSpace(res.ipType)
+	case "originalInput":
+		return strings.TrimSpace(res.originalInput)
+	case "dc":
+		return strings.TrimSpace(res.dataCenter)
+	case "loc":
+		return strings.TrimSpace(res.locCode)
+	case "region":
+		return strings.TrimSpace(res.region)
+	case "city":
+		return strings.TrimSpace(res.city)
+	case "asnNumber":
+		return strings.TrimSpace(res.asnNumber)
+	case "asnOrg":
+		return strings.TrimSpace(res.asnOrg)
+	case "visitScheme":
+		return strings.TrimSpace(res.visitScheme)
+	case "tlsVersion":
+		return strings.TrimSpace(res.tlsVersion)
+	case "sni":
+		return strings.TrimSpace(res.sni)
+	case "httpVersion":
+		return strings.TrimSpace(res.httpVersion)
+	case "warp":
+		return strings.TrimSpace(res.warp)
+	case "gateway":
+		return strings.TrimSpace(res.gateway)
+	case "rbi":
+		return strings.TrimSpace(res.rbi)
+	case "kex":
+		return strings.TrimSpace(res.kex)
+	case "timestamp":
+		return strings.TrimSpace(res.timestamp)
+	}
+	return ""
+}
+
+// resolveCFNextName 生成面板条目的 name，规则与页面导出的一行 `IP:PORT#...` 完全一致：
+// 「IP 后缀」+ 分隔符 + 其余勾选字段；数据中心已由后缀体现时不再重复，空值自动跳过。
+func resolveCFNextName(res iptestResult, exp exportConfig, fallbackName string) string {
+	dc := strings.TrimSpace(res.dataCenter)
+	if dc == "" {
+		dc = strings.TrimSpace(fallbackName)
+	}
+	if dc == "" {
+		dc = "CF"
+	}
+	suffix := ""
+	switch strings.ToLower(strings.TrimSpace(exp.SuffixMode)) {
+	case "custom":
+		if text := strings.TrimSpace(exp.SuffixText); text != "" {
+			suffix = strings.ReplaceAll(text, "{dc}", dc)
+		}
+	default:
+		suffix = dc
+	}
+	sep := exp.Separator
+	if sep == "" {
+		sep = "-"
+	}
+	parts := make([]string, 0, len(exp.Fields)+1)
+	appendPart := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		for _, exist := range parts {
+			if exist == value {
+				return
+			}
+		}
+		parts = append(parts, value)
+	}
+	appendPart(suffix)
+	for _, key := range exp.Fields {
+		k := strings.TrimSpace(key)
+		if k == "" || k == "ipport" || k == "dcCountry" {
+			// ipport 已在 `IP:端口#` 里；后端没有落地区域数据，跳过。
+			continue
+		}
+		if suffix != "" && k == "dc" {
+			continue
+		}
+		appendPart(cfnextFieldValue(res, k))
+	}
+	if len(parts) == 0 {
+		// 面板条目必须有 name，否则订阅里会出现 `IP:端口#`。
+		return dc
+	}
+	return strings.Join(parts, sep)
+}
+
 // buildCFNextIPs 把测速结果转成面板条目，去重后按速度优先排序。
-func buildCFNextIPs(results []iptestResult, cfg cfnextConfig, fallbackName string) ([]cfnextPreferredIP, int) {
+func buildCFNextIPs(results []iptestResult, cfg cfnextConfig, exp exportConfig, fallbackName string) ([]cfnextPreferredIP, int) {
 	type candidate struct {
 		entry cfnextPreferredIP
 		speed float64
@@ -333,13 +456,7 @@ func buildCFNextIPs(results []iptestResult, cfg cfnextConfig, fallbackName strin
 			skipped++
 			continue
 		}
-		name := strings.TrimSpace(res.dataCenter)
-		if name == "" {
-			name = strings.TrimSpace(fallbackName)
-		}
-		if name == "" {
-			name = "CF"
-		}
+		name := resolveCFNextName(res, exp, fallbackName)
 		key := ip + "|" + itoa(res.port)
 		if idx, ok := seen[key]; ok {
 			if res.downloadSpeed > candidates[idx].speed {
