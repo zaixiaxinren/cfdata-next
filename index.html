@@ -1848,8 +1848,7 @@
             <div id="nsbControls" class="hidden">
                 <div class="control-title">
                     <span>非标参数</span>
-                    <span style="font-size:12px;color:var(--text-secondary);">支持上传 txt/csv 文件或填写网络
-                        URL（二选一）；若识别失败，请整理为每行一个目标，格式：IP 空格 端口，例如 1.2.3.4 443</span>
+                    <span style="font-size:12px;color:var(--text-secondary);">支持上传 txt/csv 文件，或填写网络 URL（可填多个，一行一个，与文件二选一）；若识别失败，请整理为每行一个目标，格式：IP 空格 端口，例如 1.2.3.4 443</span>
                 </div>
                 <div class="option-item full-width">
                     <span class="label" title="支持 txt/csv 格式">📄 IP 文件</span>
@@ -1857,9 +1856,10 @@
                         onchange="syncNSBInputMode('file')">
                 </div>
                 <div class="option-item full-width">
-                    <span class="label" title="从网络地址获取 IP 列表">🌐 网络 URL</span>
-                    <input id="nsbSourceUrl" type="url" placeholder="https://example.com/ip-list.txt"
-                        oninput="syncNSBInputMode('url')">
+                    <span class="label" title="从网络地址获取 IP 列表，可填多个，一行一个">🌐 网络 URL</span>
+                    <textarea id="nsbSourceUrl" rows="3" placeholder="一行一个 URL，例如：&#10;https://example.com/ip-list.txt&#10;https://example.com/backup-list.txt"
+                        style="flex:1;min-width:0;width:100%;font-size:12px;font-family:monospace;resize:vertical;line-height:1.5;"
+                        oninput="syncNSBInputMode('url')"></textarea>
                 </div>
                 <div class="option-item">
                     <span class="label" title="未指定端口时使用的默认端口">🚪 备用端口</span>
@@ -5013,6 +5013,13 @@
             if (hasFile === hasURL) {
                 showNoticeCard('请选择本地文件或填写网络 URL（二选一）');
                 return;
+            }
+            if (hasURL) {
+                const badURL = sourceURL.split(/\s+/).filter(Boolean).find((u) => !/^https?:\/\//i.test(u));
+                if (badURL) {
+                    showNoticeCard(`网络 URL 格式不正确：${badURL}`);
+                    return;
+                }
             }
 
             const maxThreads = parseInt(document.getElementById('nsbThreads').value) || 100;

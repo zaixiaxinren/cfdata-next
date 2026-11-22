@@ -70,6 +70,19 @@ docker compose -f docker-compose.host.yml up -d --build
 
 跑批参数沿用原版非标优选的语义（线程数、延迟阈值、结果上限、测速线程、测速阈值等），当前取 `panel-config.json` 里 `runner` 段的值。
 
+### 🌐 非标优选页面的网络 URL（支持多个）
+
+「非标优选」面板里的「🌐 网络 URL」现在可以一次填多个地址，一行一个：
+
+```
+https://example.com/ip-list.txt
+https://example.com/backup-list.txt
+```
+
+- 服务端按行拆分后逐个拉取，内容拼接后统一解析，重复的 `IP:端口` 自动去重
+- 某个地址失败只跳过并记一条 ⚠️ 警告日志，其余地址照常继续；全部失败才终止任务
+- 仍与「📄 IP 文件」二选一，两者同时填会提示先清掉一个
+
 ### ☁️ CFNext 推送
 
 填面板入口地址（例如 `https://xxx.pages.dev/abcd`）和面板密码即可。

@@ -79,6 +79,20 @@ func readIPsWithFallbackPort(filename string, fallbackPort int) ([]string, error
 	return parseNSBInputs(string(data), fallbackPort), nil
 }
 
+// splitSourceURLs 把用户填写的多行/多段网络 URL 拆成列表（一行一个，也兼容空白分隔）。
+func splitSourceURLs(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == '\n' || r == '\r' || r == ' ' || r == '\t'
+	})
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 func defaultNSBPort(enableTLS bool) int {
 	if enableTLS {
 		return 443

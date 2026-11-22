@@ -261,37 +261,69 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				params.OutFile = "ip.csv"
 			}
 			hasFileContent := strings.TrimSpace(params.FileContent) != ""
-			hasSourceURL := strings.TrimSpace(params.SourceURL) != ""
+			sourceURLs := splitSourceURLs(params.SourceURL)
+			hasSourceURL := len(sourceURLs) > 0
 			if hasFileContent == hasSourceURL {
 				session.sendWSMessage("error", "请选择本地文件或网络URL（二选一）")
 				return
 			}
 			if hasSourceURL {
-				parsedURL, err := url.Parse(params.SourceURL)
-				if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Host == "" {
-					session.sendWSMessage("error", "网络URL必须是有效的 http/https 地址")
-					return
+				for _, rawURL := range sourceURLs {
+					parsedURL, err := url.Parse(rawURL)
+					if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Host == "" {
+						session.sendWSMessage("error", "网络URL必须是有效的 http/https 地址: "+rawURL)
+						return
+					}
 				}
+			}
+			sourceLabel := params.SourceURL
+			if len(sourceURLs) > 1 {
+				sourceLabel = fmt.Sprintf("%s 等 %d 个URL", sourceURLs[0], len(sourceURLs))
 			}
 			scanMode := params.ScanMode
 			if scanMode == "" {
 				scanMode = scanModeTCPing
 			}
-			session.startTaskNamed("非标优选", "nsb", map[string]interface{}{"fileName": params.FileName, "sourceURL": params.SourceURL, "outFile": params.OutFile, "maxThreads": params.MaxThreads, "fallbackPort": params.FallbackPort, "speedTest": params.SpeedTest, "speedURL": params.SpeedURL, "enableTLS": params.EnableTLS, "delay": params.Delay, "resultLimit": params.ResultLimit, "dc": params.DC, "speedMin": params.SpeedMin, "speedLimit": params.SpeedLimit, "compact": params.Compact, "scanMode": scanMode}, func(ctx context.Context, session *appSession) {
+			session.startTaskNamed("非标优选", "nsb", map[string]interface{}{"fileName": params.FileName, "sourceURL": sourceLabel, "outFile": params.OutFile, "maxThreads": params.MaxThreads, "fallbackPort": params.FallbackPort, "speedTest": params.SpeedTest, "speedURL": params.SpeedURL, "enableTLS": params.EnableTLS, "delay": params.Delay, "resultLimit": params.ResultLimit, "dc": params.DC, "speedMin": params.SpeedMin, "speedLimit": params.SpeedLimit, "compact": params.Compact, "scanMode": scanMode}, func(ctx context.Context, session *appSession) {
 				fileName := params.FileName
 				fileContent := params.FileContent
 				if hasSourceURL {
-					session.sendWSMessage("log", "正在获取非标网络输入: "+params.SourceURL)
-					content, err := getURLContentViaProxy(ctx, params.SourceURL)
-					if err != nil {
+					parts := make([]string, 0, len(sourceURLs))
+					failed := 0
+					for i, rawURL := range sourceURLs {
 						if ctx.Err() != nil {
 							return
 						}
-						session.sendWSMessage("error", "获取非标网络输入失败: "+err.Error())
+						prefix := ""
+						if len(sourceURLs) > 1 {
+							prefix = fmt.Sprintf("[%d/%d] ", i+1, len(sourceURLs))
+						}
+						session.sendWSMessage("log", prefix+"正在获取非标网络输入: "+rawURL)
+						content, err := getURLContentViaProxy(ctx, rawURL)
+						if err != nil {
+							if ctx.Err() != nil {
+								return
+							}
+							failed++
+							session.sendWSMessage("log", fmt.Sprintf("⚠️ %s获取失败，已跳过: %v", prefix, err))
+							continue
+						}
+						if strings.TrimSpace(content) == "" {
+							failed++
+							session.sendWSMessage("log", prefix+"返回内容为空，已跳过")
+							continue
+						}
+						parts = append(parts, content)
+					}
+					if len(parts) == 0 {
+						session.sendWSMessage("error", "所有网络URL都没有获取到内容")
 						return
 					}
-					fileName = params.SourceURL
-					fileContent = content
+					if len(sourceURLs) > 1 {
+						session.sendWSMessage("log", fmt.Sprintf("网络URL处理完成：成功 %d 个，失败 %d 个", len(parts), failed))
+					}
+					fileName = sourceLabel
+					fileContent = strings.Join(parts, "\n")
 				}
 				runNSBTask(ctx, session, fileName, fileContent, params.OutFile, params.MaxThreads, params.FallbackPort, params.SpeedTest, params.SpeedURL, params.EnableTLS, params.Delay, params.ResultLimit, params.DC, params.SpeedMin, params.SpeedLimit, params.Compact, scanMode, params.RelinkHost)
 			})
