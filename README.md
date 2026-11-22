@@ -27,7 +27,62 @@ Dockerfile        多阶段构建
 docker-compose.yml / docker-compose.host.yml
 ```
 
-## 部署
+## 用现成镜像（推荐）
+
+已发布到 Docker Hub，同一份 tag 同时支持 `linux/amd64` 与 `linux/arm64`（x86 NAS、群晖 ARM、树莓派、N1 都能用）：
+
+```bash
+docker pull zaixiaxinren/cfdata-next:latest
+```
+
+最小启动：
+
+```bash
+docker run -d --name cfdata-next \
+  -p 13335:13335 \
+  -v "$(pwd)/data:/data" \
+  --restart unless-stopped \
+  zaixiaxinren/cfdata-next:latest
+```
+
+需要扫描 / 测速 **IPv6** 时改用 host 网络（此时 `-p` 可以去掉，端口直接由宿主监听）：
+
+```bash
+docker run -d --name cfdata-next \
+  --network host \
+  -v "$(pwd)/data:/data" \
+  --restart unless-stopped \
+  zaixiaxinren/cfdata-next:latest
+```
+
+用 compose 拉镜像（把下面的内容存成 `docker-compose.yml`，不需要源码）：
+
+```yaml
+services:
+  cfdata-next:
+    image: zaixiaxinren/cfdata-next:latest
+    container_name: cfdata-next
+    restart: unless-stopped
+    ports:
+      - "13335:13335"
+    volumes:
+      - ./data:/data
+    environment:
+      - TZ=Asia/Shanghai
+      - CFDATA_DATA_DIR=/data
+```
+
+tag 规则：
+
+| tag | 含义 |
+|---|---|
+| `latest` | 跟随 `main` 分支最新一次构建 |
+| `v1.0.0` | 推 `v*` 形式的 git tag 时自动生成，对应那个版本 |
+| `sha-ade38f6` | 对应某次提交，需要精确回滚时用 |
+
+镜像由 GitHub Actions 在 `main` 分支推送后自动构建；`Dockerfile` 用交叉编译，arm64 不依赖 QEMU 模拟。
+
+## 从源码构建
 
 在 NAS 上（源码目录）：
 
