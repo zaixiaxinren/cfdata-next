@@ -1,0 +1,11 @@
+.git
+.gitignore
+data/
+*.exe
+*.log
+*.csv
+__pycache__/
+tools/
+docker-compose*.yml
+Dockerfile
+README.md
